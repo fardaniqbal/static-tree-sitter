@@ -205,21 +205,16 @@ download_and_extract() {
 # TODO: don't install rust if it's already installed.
 export RUSTUP_HOME="$PREFIX/rust/rustup"
 export CARGO_HOME="$PREFIX/rust/cargo"
-#export PATH="$CARGO_HOME/bin:$PATH"
 [ -f "$CARGO_HOME/env" ] && . "$CARGO_HOME/env"
 
 mkdir -p "$CARGO_HOME"
 [ -d "$CARGO_HOME" ] || error 'could not mkdir %s\n' "'$CARGO_HOME'"
-cat > "$CARGO_HOME/config.toml" <<EOF
-[http]
-check-revocation = false
-multiplexing = true
-EOF
 
-if command -v cargo >/dev/null; then
+if [ -f "$CARGO_HOME/.install-success" ]; then
   dbg 'rust already installed; skipping...\n'
 else
   dbg 'installing rust...\n'
+  rm -rf "$CARGO_HOME" "$RUSTUP_HOME"
   dldir="$DOWNLOAD_DIR/rust"
   mkdir -p "$dldir"
   [ -d "$dldir" ] || error 'could not mkdir %s\n' "'$dldir'"
@@ -230,6 +225,7 @@ else
   "$dldir/rustup-init.sh" --no-update-default-toolchain --no-modify-path \
     --default-host="x86_64-unknown-linux-musl" --target="x86_64-unknown-linux-musl" -y
   . "$CARGO_HOME/env"
+  touch "$CARGO_HOME/.install-success"
 fi
 
 # Make sure the installer worked.
