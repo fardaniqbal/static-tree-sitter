@@ -59,7 +59,7 @@ check_prereq() {
   exit 1
 }
 check_prereq 'curl'
-check_prereq 'zig'
+#check_prereq 'zig'
 check_prereq 'jq'
 
 if command -v sha256sum >/dev/null 2>&1; then
@@ -201,10 +201,95 @@ download_and_extract() {
   esac
 }
 
+### Libclang - needed by tree-sitter dependency bindgen ###
+
+# We're hard-coding v21.1.0 for libclang, as that's the clang version used
+# by zig-0.16.  TODO: support aarch64-linux in addition to x86_64-linux.
+if false; then
+  dbg 'Getting libclang...\n'
+  libclang_tag="21.1.0"
+  [ "$TARGET_OS" = linux ] || error '!!! TODO: Windows and Mac OS support !!!\n'
+  [ "$TARGET_CPU" = x86_64 ] || error '!!! TODO: aarch64 support !!!\n'
+  libclang_pkg="LLVM-$libclang_tag-Linux-X64.tar.xz"
+  libclang_url="https://github.com/llvm/llvm-project/releases/download/llvmorg-$libclang_tag/$libclang_pkg"
+  dldir="$DOWNLOAD_DIR/libclang-$TARGET_CPU-$TARGET_OS"
+  mkdir -p "$dldir"
+  [ -d "$dldir" ] || error 'could not mkdir %s\n' "'$dldir'"
+
+  if [ -f "$dldir/$libclang_pkg" ]; then
+    dbg '%s already downloaded; skipping...\n' "$libclang_pkg"
+  else
+    dbg 'downloading %s...\n' "$libclang_url"
+    curl -kfL "$libclang_url" > "$dldir/$libclang_pkg"
+  fi
+
+  dbg 'extracting %s...\n' "$libclang_pkg"
+  (cd "$dldir"
+  tar --strip-components=1 --wildcards '*/lib' -xJ < "$libclang_pkg")
+  export LIBCLANG_PATH="$DOWNLOAD_DIR/libclang-$TARGET_CPU-$TARGET_OS/lib"
+  while read d; do
+    BINDGEN_EXTRA_CLANG_ARGS="$BINDGEN_EXTRA_CLANG_ARGS -I$d"
+  done \
+  <<< "$(find "$DOWNLOAD_DIR/libclang-$TARGET_CPU-$TARGET_OS" -iname 'include' -a -type d)"
+
+  dbg 'pulling some shenanigans to make bindgen cooperate with zig...\n'
+  zig_libc_dir="$(zig env |
+    grep $'^[ \t]*\.lib_dir[ \t]*=' |
+    sed $'s|^.*"\\([^"]*\\)".*$|\\1|g')"
+  BINDGEN_EXTRA_CLANG_ARGS="$BINDGEN_EXTRA_CLANG_ARGS \
+    -I$zig_libc_dir/libc/musl/include \
+    -I$zig_libc_dir/libc/include/x86_64-linux-musl"
+  BINDGEN_EXTRA_CLANG_ARGS="$BINDGEN_EXTRA_CLANG_ARGS -target x86_64-linux-musl"
+  export BINDGEN_EXTRA_CLANG_ARGS
+
+  dbg 'BINDGEN_EXTRA_CLANG_ARGS:\n'
+  for i in $BINDGEN_EXTRA_CLANG_ARGS; do dbg '    %s\n' "$i"; done
+fi
+
+# Map the host compiler target probe explicitly to Zig's naming convention.
+# export CC_x86_64_unknown_linux_gnu="$DOWNLOAD_DIR/zig-wrapper cc -target x86_64-linux-gnu"
+# export CXX_x86_64_unknown_linux_gnu="$DOWNLOAD_DIR/zig-wrapper c++ -target x86_64-linux-gnu"
+#
+# # Re-verify the musl cross-compilation pipeline strings.
+# export CC_x86_64_unknown_linux_musl="$DOWNLOAD_DIR/zig-wrapper cc -target x86_64-linux-musl"
+# export CXX_x86_64_unknown_linux_musl="$DOWNLOAD_DIR/zig-wrapper c++ -target x86_64-linux-musl"
+#
+# # Need a wrapper script to convert to zig's expected target triple.
+# cat << 'EOF' > "$DOWNLOAD_DIR/zig-wrapper"
+# #!/usr/bin/env bash
+# # TOOL=''
+# # case "$1" in
+# #   cc|c++) TOOL="$1"; shift;;
+# # esac
+#
+# # Reconstruct the arguments, swapping out the incompatible Rust triple
+# ARGS=()
+# for arg in "$@"; do
+#   if [ "$arg" = "x86_64-unknown-linux-musl" ]; then
+#     ARGS+=("x86_64-linux-musl")
+#   elif [ "$arg" = "x86_64-unknown-linux-gnu" ]; then
+#     ARGS+=("x86_64-linux-gnu")
+#   else
+#     ARGS+=("$arg")
+#   fi
+# done
+#
+# # If the command is running a preprocess/compile flag, use 'zig cc'
+# # Otherwise, fall back to the base zig binary
+# if [[ " $* " == *" -E "* ]] || [[ " $* " == *" -c "* ]]; then
+#   exec zig $TOOL "${ARGS[@]}"
+# else
+#   exec zig "${ARGS[@]}"
+# fi
+# EOF
+# chmod +x "$DOWNLOAD_DIR/zig-wrapper"
+
+dbg 'bindgen/zig shenanigans complete.\n'
+
 ### Rust ###
-# TODO: don't install rust if it's already installed.
-export RUSTUP_HOME="$PREFIX/rust/rustup"
-export CARGO_HOME="$PREFIX/rust/cargo"
+
+export RUSTUP_HOME="$PREFIX/rust"
+export CARGO_HOME="$PREFIX/rust"
 [ -f "$CARGO_HOME/env" ] && . "$CARGO_HOME/env"
 
 mkdir -p "$CARGO_HOME"
@@ -222,14 +307,77 @@ else
   curl -kfsSL --proto '=https' --tlsv1.2 "https://sh.rustup.rs" \
     > "$dldir/rustup-init.sh"
   chmod +x "$dldir/rustup-init.sh"
-  "$dldir/rustup-init.sh" --no-update-default-toolchain --no-modify-path \
-    --default-host="x86_64-unknown-linux-musl" --target="x86_64-unknown-linux-musl" -y
+  "$dldir/rustup-init.sh" \
+    --no-modify-path \
+    --target="x86_64-unknown-linux-musl" -y
   . "$CARGO_HOME/env"
+
+#   cat > "$CARGO_HOME/config.toml" <<EOF
+# [target.x86_64-unknown-linux-musl]
+# linker = "cargo-zigbuild"
+# EOF
+
+  dbg 'Installing cargo-zigbuid...\n'
+  cargo install cargo-zigbuild
+
+  dbg 'Doing rustup stuff...\n'
+  rustup update
+  rustup toolchain install stable
   touch "$CARGO_HOME/.install-success"
 fi
 
 # Make sure the installer worked.
 command -v cargo >/dev/null || error 'failed to install rust\n'
+[ "$TARGET_OS" = linux ] || error '!!! TODO: Windows and Mac OS support !!!\n'
+rustup default stable
+rustup target add x86_64-unknown-linux-musl
+rustup target add aarch64-unknown-linux-musl
+rustup show
 
 ### Tree-Sitter ###
-# !!! TODO !!!
+
+dbg 'Getting tree-sitter...\n'
+treesitter_latest_json="$(gh_latest_release "tree-sitter/tree-sitter")"
+treesitter_latest_tag="$(jq -r '.tag_name' <<< "$treesitter_latest_json")"
+treesitter_download_url="https://github.com/tree-sitter/tree-sitter/archive/refs/tags/$treesitter_latest_tag.tar.gz"
+dbg 'tree-sitter latest tag: %s\n' "'$treesitter_latest_tag'"
+dbg 'tree-sitter download URL: %s\n' "'$treesitter_download_url'"
+
+download_and_extract \
+  "$treesitter_download_url" "$DOWNLOAD_DIR/tree-sitter"
+
+# Build tree-sitter.
+treesitter_srcdir="$(ls -1d "$DOWNLOAD_DIR"/tree-sitter/*/ | tail -n1)"
+dbg 'tree-sitter srcdir: %s\n' "'$treesitter_srcdir'"
+(
+  cd "$treesitter_srcdir"
+  [ "$TARGET_OS" = linux ] || error '!!! TODO: Windows and Mac OS support !!!\n'
+
+  # Tree-sitter depends on QuickJS, and `cargo zigbuild` alone won't build
+  # QuickJS statically, so manually inject target-specific env vars.
+  # export CC="zig cc -target x86_64-linux-musl"
+  # export CXX="zig c++ -target x86_64-linux-musl"
+  # export CFLAGS="-O2 -fno-strict-aliasing -g0"
+  # export CXXFLAGS="$CFLAGS"
+  # export RUSTFLAGS="-C target-feature=+crt-static"
+  dbg 'running `cargo build`...\n'
+  cargo build --release --target x86_64-unknown-linux-musl -p tree-sitter-cli
+)
+
+dbg 'searching for tree-sitter binary...\n'
+treesitter_bin="$(while read bin; do
+  [ -x "$bin" ] || continue
+  printf '%s\n' "$bin"; break;
+done <<< "$(find "$treesitter_srcdir" -iname 'tree-sitter')")"
+[ -n "$treesitter_bin" ] || error 'tree-sitter binary not found\n'
+
+dbg 'found %s\n' "'$treesitter_bin'"
+command -v strip >/dev/null && strip "$treesitter_bin"
+dbg 'installing %s to %s...\n' "$treesitter_bin" "$PREFIX/bin"
+mkdir -p "$PREFIX/bin"
+[ -d "$PREFIX/bin" ] || error 'unabled to mkdir %s\n' "'$PREFIX/bin'"
+cp "$treesitter_bin" "$PREFIX/bin"
+
+printf '\n================\n'
+printf 'tree-sitter installed successfully to\n  %s\n' "'$PREFIX/bin'"
+ldd "$PREFIX/bin/$(basename "$treesitter_bin")"

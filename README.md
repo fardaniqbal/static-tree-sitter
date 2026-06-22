@@ -1,5 +1,3 @@
-# !!! This package is not yet fully implemented !!!
-
 Installer for statically-linked tree-sitter.  Downloads the latest stable
 source package, builds it, and installs it to a **non-system-wide**
 directory.
@@ -13,6 +11,10 @@ and available in your `$PATH`:
   [shasum](https://linux.die.net/man/1/shasum) - only need one or the
   other, and you likely already have one of them
 - [jq](https://jqlang.org/)
+- musl/libclang development tools.  On Debian-based systems:
+  ```bash
+  sudo apt-get update && sudo apt-get install -y musl-tools musl-dev clang libclang-dev
+  ```
 
 ## Installation
 
