@@ -14,11 +14,12 @@
 # - [ ] Auto-install prerequisites `jq` and `zig`
 # - [ ] Use `wget` as downloader if `curl` isn't available
 # - [ ] Add `--clean` flag to re-download and build from scratch
-set -eo pipefail
+set -Eeo pipefail
 
 self="$(basename "$0")"
 here="$(cd "$(dirname "$0")" && pwd)"
 export PREFIX="${PREFIX:-"$here/.install"}"
+export DOWNLOAD_DIR="${DOWNLOAD_DIR:-"$here/.download"}"
 dbg() { true && (printf '[DBG]: '; printf "$@") >&2 || :; }
 error() { (printf '\n%s: ERROR: ' "$self"; printf "$@") >&2; exit 1; }
 unquote_json() { sed -E 's|^.*"([^"]+)".*$|\1|'; }
@@ -67,6 +68,52 @@ elif command -v shasum >/dev/null 2>&1; then
   sha256sum() { command shasum -a 256 "$@"; }
 else
   error "missing prerequisite 'sha256sum'.\\n"
+fi
+
+mkdir -p "$PREFIX" "$DOWNLOAD_DIR"
+[ -d "$PREFIX" ] || error 'could not mkdir %s\n' "'$PREFIX'"
+[ -d "$DOWNLOAD_DIR" ] || error 'could not mkdir %s\n' "'$DOWNLOAD_DIR'"
+
+### Zscaler Compatibility ###
+
+# Be compatible with corporate Zscaler environments.  If we're on WSL, then
+# get Zscaler Root CA from Windows' trust store, append it to a copy of the
+# system certificate bundle, and tell OpenSSL to use _that_ as the bundle.
+if command -v wslpath >/dev/null && [ -n "$(which wslpath 2>/dev/null)" ]; then
+  openssl_dir="$(openssl version -d | sed 's|OPENSSLDIR:[ '$'\t'']*"\([^"]*\)"|\1|')"
+  dbg 'In WSL; using openssl dir %s\n' "'$openssl_dir'"
+  cp "$openssl_dir/cert.pem" "$PREFIX/cert.pem"
+
+  dbg 'Getting Zscaler Root CA...\n'
+  zscaler_root_ca="$(powershell.exe \
+    -NoProfile -ExecutionPolicy Bypass -Command 2>/dev/null "$(cat <<'EOF'
+# Find the Zscaler Root CA in the Local Machine Trusted Root store.
+$certs = Get-ChildItem "Cert:\LocalMachine\Root" |
+  Where-Object { $_.Subject -like "*Zscaler*" }
+
+# Export each cert to Base64 (PEM) format.
+$pemCert = ""
+foreach ($cert in $certs) {
+  # Convert cert to raw Base64.
+  $base64 = [System.Convert]::ToBase64String($cert.Export(
+      [System.Security.Cryptography.X509Certificates.X509ContentType]::Cert
+  ))
+  # Wrap Base64 text to 64-char lines.
+  $base64 = ($base64 -split "(.{64})") |
+      Where-Object { $_ } | ForEach-Object { $_ } | Out-String
+  # Add header and footer.
+  $pemCert +=
+      "-----BEGIN CERTIFICATE-----`n" +
+      $base64 +
+      "-----END CERTIFICATE-----`n"
+}
+# Dump the PEM-format certificates to standard output.
+$pemCert.TrimEnd()
+EOF
+  )" | tr -d $'\r')" || : # don't fail if not in a zscaler environment
+  printf '%s\n' "$zscaler_root_ca"  >> "$PREFIX/cert.pem"
+  export SSL_CERT_FILE="$PREFIX/cert.pem"
+  dbg 'SSL_CERT_FILE = %s\n' "'$SSL_CERT_FILE'"
 fi
 
 # Use Github API to determine latest release of project $1, where $1 is
@@ -161,17 +208,6 @@ export CARGO_HOME="$PREFIX/rust/cargo"
 #export PATH="$CARGO_HOME/bin:$PATH"
 [ -f "$CARGO_HOME/env" ] && . "$CARGO_HOME/env"
 
-### Getting ZScaler Root CA on Windows ###
-# 1.  Press Win + R, type certlm.msc, and press Enter to open the Local
-#     Machine Certificate Store.
-# 2.  Navigate to Trusted Root Certification Authorities > Certificates.
-# 3.  Locate the entry named Zscaler Root CA.
-# 4.  Right-click it > All Tasks > Export...
-# 5.  Choose Base-64 encoded X.509 (.CER).
-# 6.  Save it to a known directory (e.g., C:\certs\zscaler.pem—you can
-#     manually type the .pem extension).
-export SSL_CERT_FILE="$here/2026-06-21-zscaler-root-ca.pem"
-
 mkdir -p "$CARGO_HOME"
 [ -d "$CARGO_HOME" ] || error 'could not mkdir %s\n' "'$CARGO_HOME'"
 cat > "$CARGO_HOME/config.toml" <<EOF
@@ -184,7 +220,7 @@ if command -v cargo >/dev/null; then
   dbg 'rust already installed; skipping...\n'
 else
   dbg 'installing rust...\n'
-  dldir="$here/.download/rust"
+  dldir="$DOWNLOAD_DIR/rust"
   mkdir -p "$dldir"
   [ -d "$dldir" ] || error 'could not mkdir %s\n' "'$dldir'"
 
