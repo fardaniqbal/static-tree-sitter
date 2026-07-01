@@ -24,6 +24,14 @@ dbg() { true && (printf '[DBG]: '; printf "$@") >&2 || :; }
 error() { (printf '\n%s: ERROR: ' "$self"; printf "$@") >&2; exit 1; }
 unquote_json() { sed -E 's|^.*"([^"]+)".*$|\1|'; }
 
+# Use custom tmp dir because many systems have /tmp configured as noexec.
+export TMPDIR="$HOME/.$self.$$"
+export TMP="$TMPDIR"
+dbg 'using $TMPDIR %s\n' "'$TMPDIR'"
+trap "rm -rf -- '$TMPDIR'" EXIT
+mkdir -p "$TMPDIR"
+[ -d "$TMPDIR" ] || error 'could not make TMPDIR %s\n' "'$TMDPDIR'"
+
 # Target host CPU/OS by default.
 TARGET_CPU="$(printf '%s' "${TARGET_CPU:-$(uname -m)}" | tr [A-Z] [a-z])"
 TARGET_OS="$(printf '%s' "${TARGET_OS:-$(uname -s)}" | tr [A-Z] [a-z])"
@@ -309,7 +317,7 @@ else
   chmod +x "$dldir/rustup-init.sh"
   "$dldir/rustup-init.sh" \
     --no-modify-path \
-    --target="x86_64-unknown-linux-musl" -y
+    -y #--target="x86_64-unknown-linux-musl"
   . "$CARGO_HOME/env"
 
 #   cat > "$CARGO_HOME/config.toml" <<EOF
@@ -317,8 +325,8 @@ else
 # linker = "cargo-zigbuild"
 # EOF
 
-  dbg 'Installing cargo-zigbuid...\n'
-  cargo install cargo-zigbuild
+#  dbg 'Installing cargo-zigbuid...\n'
+#  cargo install cargo-zigbuild
 
   dbg 'Doing rustup stuff...\n'
   rustup update
@@ -329,10 +337,58 @@ fi
 # Make sure the installer worked.
 command -v cargo >/dev/null || error 'failed to install rust\n'
 [ "$TARGET_OS" = linux ] || error '!!! TODO: Windows and Mac OS support !!!\n'
-rustup default stable
-rustup target add x86_64-unknown-linux-musl
-rustup target add aarch64-unknown-linux-musl
-rustup show
+# rustup default stable
+# rustup target add x86_64-unknown-linux-musl
+# rustup target add aarch64-unknown-linux-musl
+# rustup show
+
+### Libclang compatible with old glibc ###
+
+dbg 'Downloading compatible libclang build...\n'
+[ "$TARGET_OS" = linux ] || error '!!! TODO: Windows and Mac OS support !!!\n'
+if [ "$TARGET_CPU" = "aarch64" ]; then
+  libclang_url="https://files.pythonhosted.org/packages/3c/3d/f0ac1150280d8d20d059608cf2d5ff61b7c3b7f7bcf9c0f425ab92df769a/libclang-18.1.1-py2.py3-none-manylinux2014_aarch64.whl"
+  libclang_sha_expect="54dda940a4a0491a9d1532bf071ea3ef26e6dbaf03b5000ed94dd7174e8f9592"
+elif [ "$TARGET_CPU" = "x86_64" ]; then
+  libclang_url="https://files.pythonhosted.org/packages/1d/fc/716c1e62e512ef1c160e7984a73a5fc7df45166f2ff3f254e71c58076f7c/libclang-18.1.1-py2.py3-none-manylinux2010_x86_64.whl"
+  libclang_sha_expect="c533091d8a3bbf7460a00cb6c1a71da93bffe148f172c7d03b1c31fbf8aa2a0b"
+else
+  error 'CPU %d not supported\n' "$TARGET_CPU"
+fi
+
+dldir="$DOWNLOAD_DIR/libclang"
+mkdir -p "$dldir"
+[ -d "$dldir" ] || error 'could not mkdir %s\n' "'$dldir'"
+libclang_pkg="libclang-linux.whl"
+libclang_sha_actual=""
+if [ -f "$dldir/$libclang_pkg" ]; then
+  libclang_sha_actual="$(sha256sum "$dldir/$libclang_pkg" | awk '{printf $1}')"
+fi
+if [ "$libclang_sha_actual" = "$libclang_sha_expect" ]; then
+  dbg 'libclang already downloaded; skipping...\n'
+else
+  curl -kfL "$libclang_url" > "$dldir/$libclang_pkg"
+  libclang_sha_actual="$(sha256sum "$dldir/$libclang_pkg" | awk '{printf $1}')"
+  dbg 'libclang expected sha : %s\n' "$libclang_sha_expect"
+  dbg 'libclang actual sha   : %s\n' "$libclang_sha_actual"
+  if [ "$libclang_sha_actual" != "$libclang_sha_expect" ]; then
+    error '%s sha mismatch!\n' "$libclang_pkg"
+  fi
+fi
+
+dbg 'Installing libclang...\n'
+libclang_prefix="$PREFIX/libclang/lib"
+mkdir -p "$libclang_prefix"
+[ -d "$libclang_prefix" ] || error 'could not mkdir %s\n' "'$libclang_prefix'"
+unzip -p "$dldir/$libclang_pkg" \
+  "libclang-18.1.1.data/platlib/clang/native/libclang.so" > \
+  "$libclang_prefix/libclang.so"
+chmod +x "$libclang_prefix/libclang.so"
+
+###
+### TODO: build tree-sitter-cli against our libclang download!
+###
+exit 0
 
 ### Tree-Sitter ###
 
