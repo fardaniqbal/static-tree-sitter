@@ -24,13 +24,19 @@ dbg() { true && (printf '[DBG]: '; printf "$@") >&2 || :; }
 error() { (printf '\n%s: ERROR: ' "$self"; printf "$@") >&2; exit 1; }
 unquote_json() { sed -E 's|^.*"([^"]+)".*$|\1|'; }
 
+# Do `mkdir -p "$@"`, but fail if the dir(s) couldn't be created.
+mkdir_p() {
+  mkdir -p "$@"
+  local d
+  for d in "$@"; do [ -d "$d" ] || error 'could not mkdir %s\n' "'$d'"; done
+}
+
 # Use custom tmp dir because many systems have /tmp configured as noexec.
 export TMPDIR="$HOME/.$self.$$"
 export TMP="$TMPDIR"
 dbg 'using $TMPDIR %s\n' "'$TMPDIR'"
 trap "rm -rf -- '$TMPDIR'" EXIT
-mkdir -p "$TMPDIR"
-[ -d "$TMPDIR" ] || error 'could not make TMPDIR %s\n' "'$TMDPDIR'"
+mkdir_p "$TMPDIR"
 
 # Target host CPU/OS by default.
 TARGET_CPU="$(printf '%s' "${TARGET_CPU:-$(uname -m)}" | tr [A-Z] [a-z])"
@@ -78,9 +84,7 @@ else
   error "missing prerequisite 'sha256sum'.\\n"
 fi
 
-mkdir -p "$PREFIX" "$DOWNLOAD_DIR"
-[ -d "$PREFIX" ] || error 'could not mkdir %s\n' "'$PREFIX'"
-[ -d "$DOWNLOAD_DIR" ] || error 'could not mkdir %s\n' "'$DOWNLOAD_DIR'"
+mkdir_p "$PREFIX" "$DOWNLOAD_DIR"
 
 ### Zscaler Compatibility ###
 
@@ -221,8 +225,7 @@ if false; then
   libclang_pkg="LLVM-$libclang_tag-Linux-X64.tar.xz"
   libclang_url="https://github.com/llvm/llvm-project/releases/download/llvmorg-$libclang_tag/$libclang_pkg"
   dldir="$DOWNLOAD_DIR/libclang-$TARGET_CPU-$TARGET_OS"
-  mkdir -p "$dldir"
-  [ -d "$dldir" ] || error 'could not mkdir %s\n' "'$dldir'"
+  mkdir_p "$dldir"
 
   if [ -f "$dldir/$libclang_pkg" ]; then
     dbg '%s already downloaded; skipping...\n' "$libclang_pkg"
@@ -300,8 +303,7 @@ export RUSTUP_HOME="$PREFIX/rust"
 export CARGO_HOME="$PREFIX/rust"
 [ -f "$CARGO_HOME/env" ] && . "$CARGO_HOME/env"
 
-mkdir -p "$CARGO_HOME"
-[ -d "$CARGO_HOME" ] || error 'could not mkdir %s\n' "'$CARGO_HOME'"
+mkdir_p "$CARGO_HOME"
 
 if [ -f "$CARGO_HOME/.install-success" ]; then
   dbg 'rust already installed; skipping...\n'
@@ -309,8 +311,7 @@ else
   dbg 'installing rust...\n'
   rm -rf "$CARGO_HOME" "$RUSTUP_HOME"
   dldir="$DOWNLOAD_DIR/rust"
-  mkdir -p "$dldir"
-  [ -d "$dldir" ] || error 'could not mkdir %s\n' "'$dldir'"
+  mkdir_p "$dldir"
 
   curl -kfsSL --proto '=https' --tlsv1.2 "https://sh.rustup.rs" \
     > "$dldir/rustup-init.sh"
@@ -357,8 +358,7 @@ else
 fi
 
 dldir="$DOWNLOAD_DIR/libclang"
-mkdir -p "$dldir"
-[ -d "$dldir" ] || error 'could not mkdir %s\n' "'$dldir'"
+mkdir_p "$dldir"
 libclang_pkg="libclang-linux.whl"
 libclang_sha_actual=""
 if [ -f "$dldir/$libclang_pkg" ]; then
@@ -378,21 +378,29 @@ fi
 
 dbg 'Installing libclang...\n'
 libclang_prefix="$PREFIX/libclang/lib"
-mkdir -p "$libclang_prefix"
-[ -d "$libclang_prefix" ] || error 'could not mkdir %s\n' "'$libclang_prefix'"
+mkdir_p "$libclang_prefix"
 unzip -p "$dldir/$libclang_pkg" \
   "libclang-18.1.1.data/platlib/clang/native/libclang.so" > \
   "$libclang_prefix/libclang.so"
 chmod +x "$libclang_prefix/libclang.so"
-
-###
-### TODO: build tree-sitter-cli against our libclang download!
-###
-exit 0
+export LIBCLANG_PATH="$libclang_prefix"
 
 ### Tree-Sitter ###
 
 dbg 'Getting tree-sitter...\n'
+if true; then
+
+# TODO: the following _kind of_ worked on RHEL 9:
+#export CARGO_BUILD_BUILD_DIR="$HOME/homedir-extra/tmp-cargo-install"
+export CARGO_BUILD_BUILD_DIR="$TMPDIR/cargo-build"
+mkdir_p "$CARGO_BUILD_BUILD_DIR"
+export CARGO_TARGET_DIR="$CARGO_BUILD_BUILD_DIR"
+export TMPDIR="$CARGO_BUILD_BUILD_DIR"
+export CARGO_INSTALL_ROOT="$PREFIX/tree-sitter"
+cargo install tree-sitter-cli
+
+else
+
 treesitter_latest_json="$(gh_latest_release "tree-sitter/tree-sitter")"
 treesitter_latest_tag="$(jq -r '.tag_name' <<< "$treesitter_latest_json")"
 treesitter_download_url="https://github.com/tree-sitter/tree-sitter/archive/refs/tags/$treesitter_latest_tag.tar.gz"
@@ -430,9 +438,10 @@ done <<< "$(find "$treesitter_srcdir" -iname 'tree-sitter')")"
 dbg 'found %s\n' "'$treesitter_bin'"
 command -v strip >/dev/null && strip "$treesitter_bin"
 dbg 'installing %s to %s...\n' "$treesitter_bin" "$PREFIX/bin"
-mkdir -p "$PREFIX/bin"
-[ -d "$PREFIX/bin" ] || error 'unabled to mkdir %s\n' "'$PREFIX/bin'"
+mkdir_p "$PREFIX/bin"
 cp "$treesitter_bin" "$PREFIX/bin"
+
+fi
 
 printf '\n================\n'
 printf 'tree-sitter installed successfully to\n  %s\n' "'$PREFIX/bin'"
